@@ -2,6 +2,7 @@ from langchain.chains import RetrievalQA
 from langchain.prompts import PromptTemplate
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFacePipeline
+from langchain_huggingface import HuggingFaceEmbeddings
 from transformers import (
     AutoTokenizer,
     AutoModelForCausalLM,
@@ -9,9 +10,13 @@ from transformers import (
     BitsAndBytesConfig
 )
 import torch
-from langchain_huggingface import HuggingFaceEmbeddings
+import transformers
+import warnings
 
-# === Quantization Config ===
+# === Local Mistral model path ===
+model_path = "./Mistral-7B"
+
+# === Quantization Config (4-bit) ===
 bnb_config = BitsAndBytesConfig(
     load_in_4bit=True,
     bnb_4bit_quant_type="nf4",
@@ -19,13 +24,17 @@ bnb_config = BitsAndBytesConfig(
     bnb_4bit_use_double_quant=True
 )
 
-# === Model Loading ===
-model_name = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
-tokenizer = AutoTokenizer.from_pretrained(model_name)
+# === Load Tokenizer and Model ===
+tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+transformers.logging.set_verbosity_error()
+warnings.filterwarnings("ignore")
+
 model = AutoModelForCausalLM.from_pretrained(
-    model_name,
+    "./Mistral-7B",
     quantization_config=bnb_config,
-    device_map="auto"
+    torch_dtype=torch.float16,
+    device_map={"": 0},
+    trust_remote_code=True
 )
 
 # === Pipeline Setup ===
@@ -33,30 +42,31 @@ pipe = pipeline(
     "text-generation",
     model=model,
     tokenizer=tokenizer,
-    max_new_tokens=100,       # Limit response length
-    temperature=0.2,          # Lower temp = less verbose
-    top_p=0.8,                # Top-p filtering for focus
-    repetition_penalty=1.1,   # Penalize repetition
-    do_sample=False           # Disable sampling for deterministic output
+    max_new_tokens=80,
+    temperature=0.1,
+    top_p=0.5,
+    repetition_penalty=1.2,
+    do_sample=False
 )
 
-# === Vector DB Setup ===
+# === Embedding for Retrieval ===
 embedding_model = HuggingFaceEmbeddings(
     model_name="BAAI/bge-small-en-v1.5",
     model_kwargs={"device": "cpu"}
 )
+
 vectordb = Chroma(
     persist_directory="./rag_db",
     embedding_function=embedding_model
 )
 retriever = vectordb.as_retriever(search_kwargs={"k": 3})
 
-# === Concise Prompt Template ===
+# === Strict Prompt Template ===
 prompt_template = PromptTemplate(
     input_variables=["context", "question"],
     template="""
-Answer the following question briefly using only the context provided.
-If the answer is not in the context, say "I don't know".
+You are a helpful assistant. Use only the context below to answer.
+If the answer is not in the context, respond with: "I don't know".
 
 Context:
 {context}
@@ -77,7 +87,8 @@ qa = RetrievalQA.from_chain_type(
 
 # === Test Questions ===
 questions = [
-    "What is your name and where are you from?",
+    "What is your name?",
+    "What is my cat name?"
 ]
 
 for q in questions:
